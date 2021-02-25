@@ -13,6 +13,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::string::String;
+use xdg;
 
 mod mkdtemp;
 
@@ -196,22 +197,82 @@ fn wait_for_child(rootdir: &Path, child_pid: unistd::Pid) -> ! {
     process::exit(exit_status);
 }
 
+// get the nix chroot dir implied by the environment
+fn get_implicit_nixdir<'a>() -> PathBuf {
+
+    // if the user specified the location explicitly, use that
+    match env::var("NIX_USER_CHROOT_DIR") {
+        Ok(val) => if val != "" { return PathBuf::from(val); },
+        Err(_) => (),
+    }
+
+    // otherwise, use an XDG-friendly user-specific location
+    let xdg_dirs = xdg::BaseDirectories::new().unwrap_or_else(|err| {
+        panic!("Error getting XDG base dirs: {}", err);
+    });
+    let nixdir = xdg_dirs.get_data_home().as_path().join("nix-user-chroot");
+    if !nixdir.exists() {
+        eprintln!("Error: NIX_USER_CHROOT_DIR not defined, and \
+                  XDG_DATA_HOME/nix-user-chroot ({}) does not exist. \
+                  Please specify the chroot dir for multicall functionality",
+                  nixdir.to_str().unwrap());
+        process::exit(2);
+    }
+
+    return nixdir;
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: {} <nixpath> <command>\n", args[0]);
-        process::exit(1);
-    }
+
+    let nix_commands = [
+        "nix",
+        "nix-build",
+        "nix-channel",
+        "nix-collect-garbage",
+        "nix-copy-closure",
+        "nix-daemon",
+        "nix-env",
+        "nix-hash",
+        "nix-instantiate",
+        "nix-prefetch-url",
+        "nix-shell",
+        "nix-store",
+    ];
 
     let rootdir = mkdtemp::mkdtemp("nix-chroot.XXXXXX")
         .unwrap_or_else(|err| panic!("failed to create temporary directory: {}", err));
 
-    let nixdir = fs::canonicalize(&args[1])
-        .unwrap_or_else(|err| panic!("failed to resolve nix directory {}: {}", &args[1], err));
+    // get the multicall nix command name specified by args[0].
+    // returns None if not applicable.
+    let cmd: Option<String> =
+        Path::new(&args[0]).file_name().and_then(|x| x.to_str())
+        .and_then(|x| nix_commands.iter().find(|&&y| x == y))
+        .map(|x| x.to_string());
+
+    let (nixdir, args) = match cmd {
+        // if called as a nix command (as a busybox-style multicall binary),
+        // args are passed along to the command, and the nixdir is implicit.
+        Some(cmd) => {
+            (get_implicit_nixdir(), [&[cmd][..], &args[1..]].concat())
+        }
+        // regular non-multicall form
+        None => {
+            if args.len() < 3 {
+                eprintln!("Usage: {} <nixpath> <command>\n", args[0]);
+                process::exit(1);
+            }
+
+            let nixdir = fs::canonicalize(&args[1])
+                .unwrap_or_else(|err| panic!("failed to resolve nix directory {}: {}",
+                                             &args[1], err));
+            (nixdir, args[2..].to_vec())
+        }
+    };
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child, .. }) => wait_for_child(&rootdir, child),
-        Ok(ForkResult::Child) => RunChroot::new(&rootdir).run_chroot(&nixdir, &args[2], &args[3..]),
+        Ok(ForkResult::Child) => RunChroot::new(&rootdir).run_chroot(&nixdir, &args[0], &args[1..]),
         Err(e) => {
             eprintln!("fork failed: {}", e);
         }
