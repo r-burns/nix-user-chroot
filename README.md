@@ -103,6 +103,24 @@ The nix config is not in `/etc/nix` but in `/nix/etc/nix`, so that you can
 modify it. This is done with the `NIX_CONF_DIR`, which you can override at any
 time.
 
+# Multicall invocation
+
+You can directly invoke Nix commands within the chroot by calling
+`nix-user-chroot` as a Busybox-style multicall binary. The `nix-user-chroot`
+executable will check `argv[0]`, and if it matches an existing Nix command such
+as `nix-build` or `nix-store`, the remaining args will be passed to that command
+inside the chroot.
+
+Since the location of the Nix installation cannot be specified on the
+command-line when using this form, it is specified via `$NIX_USER_CHROOT_DIR`,
+or, if that is not defined, `XDG_DATA_HOME/nix-user-chroot`.
+
+```console
+$ ln -s $(which nix-user-chroot) ./nix-build
+$ ./nix-build --version
+nix-build (Nix) 2.3.10
+```
+
 ## Whishlist
 
 These are features the author would like to see, let me know, if you want to work
